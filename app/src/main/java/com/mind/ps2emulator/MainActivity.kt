@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
@@ -53,6 +54,8 @@ private const val PREFS_NAME = "ps2_emulator_library"
 private const val GAMES_KEY = "game_uris"
 private const val BIOS_KEY = "bios_uri"
 
+private data class GameEntry(val uri: String, val name: String)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,7 +64,8 @@ class MainActivity : ComponentActivity() {
                 initialGames = loadSavedGames(),
                 initialBiosName = loadBiosName(),
                 onImportGame = ::saveGame,
-                onImportBios = ::saveBios
+                onImportBios = ::saveBios,
+                onRemoveGame = ::removeGame
             )
         }
     }
@@ -85,27 +89,41 @@ class MainActivity : ComponentActivity() {
         contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
 
-    private fun loadSavedGames(): List<String> {
+    private fun loadSavedGames(): List<GameEntry> {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         return prefs.getStringSet(GAMES_KEY, emptySet()).orEmpty().mapNotNull { raw ->
-            runCatching { displayName(Uri.parse(raw)) }.getOrNull()
-        }.distinct()
+            runCatching {
+                val uri = Uri.parse(raw)
+                GameEntry(raw, displayName(uri))
+            }.getOrNull()
+        }.distinctBy { it.uri }.sortedBy { it.name.lowercase() }
     }
 
-    private fun saveGame(uri: Uri): String? {
+    private fun saveGame(uri: Uri): GameEntry? {
         val name = displayName(uri)
-        if (!name.substringAfterLast('.', "").equals("iso", true) &&
-            !name.substringAfterLast('.', "").equals("chd", true)
-        ) return null
+        val extension = name.substringAfterLast('.', "").lowercase()
+        if (extension !in setOf("iso", "chd")) return null
         return try {
             keepReadAccess(uri)
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             val saved = prefs.getStringSet(GAMES_KEY, emptySet()).orEmpty().toMutableSet()
             saved.add(uri.toString())
             prefs.edit().putStringSet(GAMES_KEY, saved).apply()
-            name
+            GameEntry(uri.toString(), name)
         } catch (_: SecurityException) {
             null
+        }
+    }
+
+    private fun removeGame(entry: GameEntry) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val saved = prefs.getStringSet(GAMES_KEY, emptySet()).orEmpty().toMutableSet()
+        saved.remove(entry.uri)
+        prefs.edit().putStringSet(GAMES_KEY, saved).apply()
+        runCatching {
+            contentResolver.releasePersistableUriPermission(
+                Uri.parse(entry.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
         }
     }
 
@@ -131,20 +149,21 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun EmulatorHome(
-    initialGames: List<String>,
+    initialGames: List<GameEntry>,
     initialBiosName: String?,
-    onImportGame: (Uri) -> String?,
-    onImportBios: (Uri) -> String?
+    onImportGame: (Uri) -> GameEntry?,
+    onImportBios: (Uri) -> String?,
+    onRemoveGame: (GameEntry) -> Unit
 ) {
-    val importedGames = remember { mutableStateListOf<String>().apply { addAll(initialGames) } }
+    val importedGames = remember { mutableStateListOf<GameEntry>().apply { addAll(initialGames) } }
     var biosName by remember { mutableStateOf(initialBiosName) }
     var message by remember { mutableStateOf<String?>(null) }
 
     val gameLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val name = onImportGame(uri)
-            if (name != null) {
-                if (name !in importedGames) importedGames.add(name)
+            val entry = onImportGame(uri)
+            if (entry != null) {
+                if (importedGames.none { it.uri == entry.uri }) importedGames.add(entry)
                 message = "Game added to your library"
             } else {
                 message = "Choose a supported .iso or .chd game image"
@@ -192,7 +211,13 @@ private fun EmulatorHome(
                 if (importedGames.isEmpty()) {
                     item { EmptyLibrary() }
                 } else {
-                    items(importedGames) { name -> GameRow(name) }
+                    items(importedGames, key = { it.uri }) { entry ->
+                        GameRow(entry) {
+                            onRemoveGame(entry)
+                            importedGames.remove(entry)
+                            message = "Game removed from your library"
+                        }
+                    }
                 }
                 item {
                     Text("SYSTEM", color = Color(0xFFE5EDFF), fontSize = 18.sp,
@@ -203,12 +228,14 @@ private fun EmulatorHome(
                     }
                     ActionCard("System configuration", "Graphics, audio and controller settings",
                         { Icon(Icons.Default.Settings, contentDescription = null, tint = Color(0xFFB9D4FF)) }) {
-                        message = "Advanced settings will be enabled with the emulation engine."
+                        message = "Graphics, audio and controller options require the emulation engine."
                     }
                     Spacer(Modifier.height(8.dp))
-                    Text("Game importing and BIOS selection are available. The PS2 emulation engine is not integrated yet.",
+                    Text(
+                        "Your game and BIOS selections are stored on this device. Game execution is not available until a PS2 emulation engine is integrated.",
                         color = Color(0xFF7384A5), fontSize = 11.sp,
-                        modifier = Modifier.padding(bottom = 24.dp))
+                        modifier = Modifier.padding(bottom = 24.dp)
+                    )
                 }
             }
         }
@@ -264,10 +291,22 @@ private fun EmptyLibrary() {
 }
 
 @Composable
-private fun GameRow(name: String) {
-    Row(modifier = Modifier.fillMaxWidth().background(Color(0xFF14213B), RoundedCornerShape(14.dp))
-        .padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun GameRow(entry: GameEntry, onRemove: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF14213B), RoundedCornerShape(14.dp))
+            .padding(start = 15.dp, top = 12.dp, bottom = 12.dp, end = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Icon(Icons.Default.Gamepad, contentDescription = null, tint = Color(0xFFB9D4FF))
-        Text(name, color = Color.White, modifier = Modifier.padding(start = 12.dp), fontSize = 13.sp)
+        Column(modifier = Modifier.weight(1f).padding(start = 12.dp)) {
+            Text(entry.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text("Game image • Ready for engine", color = Color(0xFF91A0BC), fontSize = 10.sp)
+        }
+        Icon(
+            Icons.Default.Delete,
+            contentDescription = "Remove game",
+            tint = Color(0xFF91A0BC),
+            modifier = Modifier.size(22.dp).clickable(onClick = onRemove).padding(2.dp)
+        )
     }
 }
