@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.sp
 private const val PREFS_NAME = "ps2_emulator_library"
 private const val GAMES_KEY = "game_uris"
 private const val BIOS_KEY = "bios_uri"
+private val SUPPORTED_GAME_EXTENSIONS = setOf("iso", "chd", "cso", "cue", "elf", "isz", "mds")
 
 private data class GameEntry(val uri: String, val name: String)
 
@@ -102,7 +103,7 @@ class MainActivity : ComponentActivity() {
     private fun saveGame(uri: Uri): GameEntry? {
         val name = displayName(uri)
         val extension = name.substringAfterLast('.', "").lowercase()
-        if (extension !in setOf("iso", "chd")) return null
+        if (extension !in SUPPORTED_GAME_EXTENSIONS) return null
         return try {
             keepReadAccess(uri)
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -166,7 +167,7 @@ private fun EmulatorHome(
                 if (importedGames.none { it.uri == entry.uri }) importedGames.add(entry)
                 message = "Game added to your library"
             } else {
-                message = "Choose a supported .iso or .chd game image"
+                message = "Unsupported file. Supported formats: ISO, CHD, CSO, CUE, ELF, ISZ, MDS"
             }
         }
     }
@@ -203,7 +204,7 @@ private fun EmulatorHome(
                     Text("Your game collection", color = Color(0xFF93A3C4), fontSize = 13.sp)
                 }
                 item {
-                    ActionCard("Import game image", "Choose a game file you own (.iso / .chd)",
+                    ActionCard("Import game image", "Import a game image you own (ISO, CHD, CSO, CUE, ELF, ISZ, MDS)",
                         { Icon(Icons.Default.Add, contentDescription = null, tint = Color(0xFFB9D4FF)) }) {
                         gameLauncher.launch(arrayOf("*/*"))
                     }
